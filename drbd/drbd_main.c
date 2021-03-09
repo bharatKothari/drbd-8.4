@@ -147,6 +147,14 @@ mempool_t *drbd_md_io_page_pool;
 struct bio_set *drbd_md_io_bio_set;
 struct bio_set *drbd_io_bio_set;
 
+void trace_get_time(time_t *time_insec) {
+	struct timeval atv;
+	do_gettimeofday(&atv);
+	if (time_insec) {
+		*time_insec = atv.tv_sec;
+	}
+}
+
 /* I do not use a standard mempool, because:
    1) I want to hand out the pre-allocated objects first.
    2) I want to be able to interrupt sleeping allocation with a signal.
@@ -1391,7 +1399,9 @@ static int _drbd_send_ack(struct drbd_peer_device *peer_device, enum drbd_packet
 {
 	struct drbd_socket *sock;
 	struct p_block_ack *p;
+	struct trace_data trace_data;
 
+	memset(&trace_data, 0, sizeof(trace_data));
 	if (peer_device->device->state.conn < C_CONNECTED)
 		return -EIO;
 
@@ -1403,6 +1413,18 @@ static int _drbd_send_ack(struct drbd_peer_device *peer_device, enum drbd_packet
 	p->block_id = block_id;
 	p->blksize = blksize;
 	p->seq_num = cpu_to_be32(atomic_inc_return(&peer_device->device->packet_seq));
+
+	trace_data.jiffies = jiffies;
+	trace_data.msg_type = 1;
+	trace_data.cmd = cmd;
+	trace_get_time(&trace_data.time_insec);
+	trace_data.bi_size = 0;
+	trace_data.p_data = (struct p_data*)p;
+
+	if(sock) {
+		trace_data.buf_ptr = (unsigned long)sock->sbuf;
+	}
+	trace_enqueue_data(&trace_data);
 	return drbd_send_command(peer_device, sock, cmd, sizeof(*p), NULL, 0);
 }
 
@@ -1728,7 +1750,9 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
 	unsigned int dp_flags = 0;
 	int digest_size;
 	int err;
-
+	struct trace_data trace_data;
+	
+	memset(&trace_data, 0, sizeof (trace_data));
 	sock = &peer_device->connection->data;
 	p = drbd_prepare_command(peer_device, sock);
 	digest_size = peer_device->connection->integrity_tfm ?
@@ -1758,6 +1782,16 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
 		enum drbd_packet cmd = (dp_flags & DP_ZEROES) ? P_ZEROES : P_TRIM;
 		struct p_trim *t = (struct p_trim*)p;
 		t->size = cpu_to_be32(req->i.size);
+		trace_data.jiffies = jiffies;
+		trace_data.msg_type = 1;
+		trace_data.cmd = cmd;
+		trace_get_time(&trace_data.time_insec);
+		trace_data.bi_size = t->size;
+		trace_data.p_data = p;
+		if(sock) {
+			trace_data.buf_ptr = (unsigned long)sock->sbuf;
+		}
+		trace_enqueue_data(&trace_data);
 		err = __send_command(peer_device->connection, device->vnr, sock, cmd, sizeof(*t), NULL, 0);
 		goto out;
 	}
@@ -1776,14 +1810,35 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
 	if (digest_size)
 		drbd_csum_bio(peer_device->connection->integrity_tfm, req->master_bio, digest_out);
 	if (wsame) {
+		trace_data.jiffies = jiffies;
+		trace_data.msg_type = 1;
+		trace_data.cmd = P_WSAME;
+		trace_get_time(&trace_data.time_insec);
+		trace_data.bi_size = wsame->size;
+		trace_data.p_data = p;
+		if(sock) {
+			trace_data.buf_ptr = (unsigned long)sock->sbuf;
+		}
+		trace_enqueue_data(&trace_data);
 		err =
 		    __send_command(peer_device->connection, device->vnr, sock, P_WSAME,
 				   sizeof(*wsame) + digest_size, NULL,
 				   bio_iovec(req->master_bio) BVD bv_len);
-	} else
+	} else {
+		trace_data.jiffies = jiffies;
+		trace_data.msg_type = 1;
+		trace_data.cmd = P_DATA;
+		trace_get_time(&trace_data.time_insec);
+		trace_data.bi_size = req->i.size;
+		trace_data.p_data = p;
+		if(sock) {
+			trace_data.buf_ptr = (unsigned long)sock->sbuf;
+		}
+		trace_enqueue_data(&trace_data);
 		err =
 		    __send_command(peer_device->connection, device->vnr, sock, P_DATA,
 				   sizeof(*p) + digest_size, NULL, req->i.size);
+	}
 	if (!err) {
 		/* For protocol A, we have to memcpy the payload into
 		 * socket buffers, as we may complete right away
@@ -1834,7 +1889,9 @@ int drbd_send_block(struct drbd_peer_device *peer_device, enum drbd_packet cmd,
 	struct p_data *p;
 	int err;
 	int digest_size;
+	struct trace_data trace_data;
 
+	memset(&trace_data, 0, sizeof(trace_data));
 	sock = &peer_device->connection->data;
 	p = drbd_prepare_command(peer_device, sock);
 
@@ -1849,6 +1906,16 @@ int drbd_send_block(struct drbd_peer_device *peer_device, enum drbd_packet cmd,
 	p->dp_flags = 0;
 	if (digest_size)
 		drbd_csum_ee(peer_device->connection->integrity_tfm, peer_req, p + 1);
+	trace_data.jiffies = jiffies;
+	trace_data.msg_type = 1;
+	trace_data.cmd = cmd;
+	trace_get_time(&trace_data.time_insec);
+	trace_data.bi_size = peer_req->i.size;
+	trace_data.p_data = p;
+	if(sock) {
+		trace_data.buf_ptr = (unsigned long)sock->sbuf;
+	}
+	trace_enqueue_data(&trace_data);
 	err = __send_command(peer_device->connection, device->vnr, sock, cmd, sizeof(*p) + digest_size, NULL, peer_req->i.size);
 	if (!err)
 		err = _drbd_send_zc_ee(peer_device, peer_req);

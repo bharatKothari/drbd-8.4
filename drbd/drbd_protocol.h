@@ -85,6 +85,13 @@ enum drbd_packet {
 	P_CONNECTION_FEATURES = 0xfffe	/* FIXED for the next century! */
 };
 
+#define TRACE_FLAGES(a)	\
+	(a == P_DATA) || (a == P_ZEROES) || (a == P_DATA_REPLY) || (a == P_RS_DATA_REPLY) || (a == P_RS_WRITE_ACK) \
+	|| (a == P_WRITE_ACK) || (a == P_RECV_ACK) || (a == P_OV_RESULT) || (a == P_NEG_DREPLY) || (a == P_RS_CANCEL) \
+	|| (a == P_RS_IS_IN_SYNC) || (a == P_NEG_RS_DREPLY) || (a == P_RETRY_WRITE) || (a == P_SUPERSEDED) || (a == P_NEG_ACK) \
+	|| ( a == P_WSAME) || (a == P_OV_REQUEST) || (a == P_DATA_REQUEST) || (a == P_RS_THIN_REQ) || (a == P_RS_DATA_REQUEST) \
+	|| (a == P_CSUM_RS_REQUEST) || (a == P_OV_REPLY)
+
 #ifndef __packed
 #define __packed __attribute__((packed))
 #endif
@@ -147,6 +154,16 @@ struct p_data {
 	u32	    seq_num;
 	u32	    dp_flags;
 } __packed;
+
+struct trace_data {
+	unsigned long		jiffies;
+	int			msg_type;
+	enum drbd_packet	cmd;
+	time_t			time_insec;
+	unsigned int		bi_size;
+	unsigned long		buf_ptr;
+	struct p_data		*p_data;
+};
 
 struct p_trim {
 	struct p_data p_data;
@@ -420,5 +437,7 @@ struct p_delay_probe93 {
  * so we are limited to 4 KiB (and not to PAGE_SIZE, which can be bigger).
  */
 #define DRBD_SOCKET_BUFFER_SIZE 4096
+
+extern int trace_enqueue_data(struct trace_data *);
 
 #endif  /* __DRBD_PROTOCOL_H */

@@ -1,0 +1,280 @@
+diff --git a/Makefile b/Makefile
+index e7008bc..72ae7db 100644
+--- a/Makefile
++++ b/Makefile
+@@ -29,6 +29,8 @@ GIT = git
+ LN_S = ln -s
+ RPMBUILD = rpmbuild
+ 
++KBUILD_EXTRA_SYMBOLS = $(PWD)/../tracer/modules.order
++
+ # default for KDIR/KVER
+ ifndef KVER
+  ifndef KDIR
+diff --git a/drbd/drbd_main.c b/drbd/drbd_main.c
+index e228679..653adc5 100644
+--- a/drbd/drbd_main.c
++++ b/drbd/drbd_main.c
+@@ -147,6 +147,14 @@ mempool_t *drbd_md_io_page_pool;
+ struct bio_set *drbd_md_io_bio_set;
+ struct bio_set *drbd_io_bio_set;
+ 
++void trace_get_time(time_t *time_insec) {
++	struct timeval atv;
++	do_gettimeofday(&atv);
++	if (time_insec) {
++		*time_insec = atv.tv_sec;
++	}
++}
++
+ /* I do not use a standard mempool, because:
+    1) I want to hand out the pre-allocated objects first.
+    2) I want to be able to interrupt sleeping allocation with a signal.
+@@ -1391,7 +1399,9 @@ static int _drbd_send_ack(struct drbd_peer_device *peer_device, enum drbd_packet
+ {
+ 	struct drbd_socket *sock;
+ 	struct p_block_ack *p;
++	struct trace_data trace_data;
+ 
++	memset(&trace_data, 0, sizeof(trace_data));
+ 	if (peer_device->device->state.conn < C_CONNECTED)
+ 		return -EIO;
+ 
+@@ -1403,6 +1413,18 @@ static int _drbd_send_ack(struct drbd_peer_device *peer_device, enum drbd_packet
+ 	p->block_id = block_id;
+ 	p->blksize = blksize;
+ 	p->seq_num = cpu_to_be32(atomic_inc_return(&peer_device->device->packet_seq));
++
++	trace_data.jiffies = jiffies;
++	trace_data.msg_type = 1;
++	trace_data.cmd = cmd;
++	trace_get_time(&trace_data.time_insec);
++	trace_data.bi_size = 0;
++	trace_data.p_data = (struct p_data*)p;
++
++	if(sock) {
++		trace_data.buf_ptr = sock->sbuf;
++	}
++	trace_enqueue_data(&trace_data);
+ 	return drbd_send_command(peer_device, sock, cmd, sizeof(*p), NULL, 0);
+ }
+ 
+@@ -1728,7 +1750,9 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
+ 	unsigned int dp_flags = 0;
+ 	int digest_size;
+ 	int err;
+-
++	struct trace_data trace_data;
++	
++	memset(&trace_data, 0, sizeof (trace_data));
+ 	sock = &peer_device->connection->data;
+ 	p = drbd_prepare_command(peer_device, sock);
+ 	digest_size = peer_device->connection->integrity_tfm ?
+@@ -1758,6 +1782,16 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
+ 		enum drbd_packet cmd = (dp_flags & DP_ZEROES) ? P_ZEROES : P_TRIM;
+ 		struct p_trim *t = (struct p_trim*)p;
+ 		t->size = cpu_to_be32(req->i.size);
++		trace_data.jiffies = jiffies;
++		trace_data.msg_type = 1;
++		trace_data.cmd = cmd;
++		trace_get_time(&trace_data.time_insec);
++		trace_data.bi_size = t->size;
++		trace_data.p_data = p;
++		if(sock) {
++			trace_data.buf_ptr = sock->sbuf;
++		}
++		trace_enqueue_data(&trace_data);
+ 		err = __send_command(peer_device->connection, device->vnr, sock, cmd, sizeof(*t), NULL, 0);
+ 		goto out;
+ 	}
+@@ -1776,14 +1810,35 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
+ 	if (digest_size)
+ 		drbd_csum_bio(peer_device->connection->integrity_tfm, req->master_bio, digest_out);
+ 	if (wsame) {
++		trace_data.jiffies = jiffies;
++		trace_data.msg_type = 1;
++		trace_data.cmd = P_WSAME;
++		trace_get_time(&trace_data.time_insec);
++		trace_data.bi_size = wsame->size;
++		trace_data.p_data = p;
++		if(sock) {
++			trace_data.buf_ptr = sock->sbuf;
++		}
++		trace_enqueue_data(&trace_data);
+ 		err =
+ 		    __send_command(peer_device->connection, device->vnr, sock, P_WSAME,
+ 				   sizeof(*wsame) + digest_size, NULL,
+ 				   bio_iovec(req->master_bio) BVD bv_len);
+-	} else
++	} else {
++		trace_data.jiffies = jiffies;
++		trace_data.msg_type = 1;
++		trace_data.cmd = P_DATA;
++		trace_get_time(&trace_data.time_insec);
++		trace_data.bi_size = req->i.size;
++		trace_data.p_data = p;
++		if(sock) {
++			trace_data.buf_ptr = sock->sbuf;
++		}
++		trace_enqueue_data(&trace_data);
+ 		err =
+ 		    __send_command(peer_device->connection, device->vnr, sock, P_DATA,
+ 				   sizeof(*p) + digest_size, NULL, req->i.size);
++	}
+ 	if (!err) {
+ 		/* For protocol A, we have to memcpy the payload into
+ 		 * socket buffers, as we may complete right away
+@@ -1834,7 +1889,9 @@ int drbd_send_block(struct drbd_peer_device *peer_device, enum drbd_packet cmd,
+ 	struct p_data *p;
+ 	int err;
+ 	int digest_size;
++	struct trace_data trace_data;
+ 
++	memset(&trace_data, 0, sizeof(trace_data));
+ 	sock = &peer_device->connection->data;
+ 	p = drbd_prepare_command(peer_device, sock);
+ 
+@@ -1849,6 +1906,16 @@ int drbd_send_block(struct drbd_peer_device *peer_device, enum drbd_packet cmd,
+ 	p->dp_flags = 0;
+ 	if (digest_size)
+ 		drbd_csum_ee(peer_device->connection->integrity_tfm, peer_req, p + 1);
++	trace_data.jiffies = jiffies;
++	trace_data.msg_type = 1;
++	trace_data.cmd = cmd;
++	trace_get_time(&trace_data.time_insec);
++	trace_data.bi_size = peer_req->i.size;
++	trace_data.p_data = p;
++	if(sock) {
++		trace_data.buf_ptr = sock->sbuf;
++	}
++	trace_enqueue_data(&trace_data);
+ 	err = __send_command(peer_device->connection, device->vnr, sock, cmd, sizeof(*p) + digest_size, NULL, peer_req->i.size);
+ 	if (!err)
+ 		err = _drbd_send_zc_ee(peer_device, peer_req);
+diff --git a/drbd/drbd_protocol.h b/drbd/drbd_protocol.h
+index d3fe48f..4764431 100644
+--- a/drbd/drbd_protocol.h
++++ b/drbd/drbd_protocol.h
+@@ -85,6 +85,13 @@ enum drbd_packet {
+ 	P_CONNECTION_FEATURES = 0xfffe	/* FIXED for the next century! */
+ };
+ 
++#define TRACE_FLAGES(a)	\
++	(a == P_DATA) || (a == P_ZEROES) || (a == P_DATA_REPLY) || (a == P_RS_DATA_REPLY) || (a == P_RS_WRITE_ACK) \
++	|| (a == P_WRITE_ACK) || (a == P_RECV_ACK) || (a == P_OV_RESULT) || (a == P_NEG_DREPLY) || (a == P_RS_CANCEL) \
++	|| (a == P_RS_IS_IN_SYNC) || (a == P_NEG_RS_DREPLY) || (a == P_RETRY_WRITE) || (a == P_SUPERSEDED) || (a == P_NEG_ACK) \
++	|| ( a == P_WSAME) || (a == P_OV_REQUEST) || (a == P_DATA_REQUEST) || (a == P_RS_THIN_REQ) || (a == P_RS_DATA_REQUEST) \
++	|| (a == P_CSUM_RS_REQUEST) || (a == P_OV_REPLY)
++
+ #ifndef __packed
+ #define __packed __attribute__((packed))
+ #endif
+@@ -148,6 +155,16 @@ struct p_data {
+ 	u32	    dp_flags;
+ } __packed;
+ 
++struct trace_data {
++	unsigned long		jiffies;
++	int			msg_type;
++	enum drbd_packet	cmd;
++	time_t			time_insec;
++	unsigned int		bi_size;
++	struct p_data		*p_data;
++	void			*buf_ptr;
++};
++
+ struct p_trim {
+ 	struct p_data p_data;
+ 	u32	    size;	/* == bio->bi_size */
+@@ -421,4 +438,6 @@ struct p_delay_probe93 {
+  */
+ #define DRBD_SOCKET_BUFFER_SIZE 4096
+ 
++extern int trace_enqueue_data(struct trace_data *);
++
+ #endif  /* __DRBD_PROTOCOL_H */
+diff --git a/drbd/drbd_receiver.c b/drbd/drbd_receiver.c
+index 8b4e639..063091c 100644
+--- a/drbd/drbd_receiver.c
++++ b/drbd/drbd_receiver.c
+@@ -68,6 +68,7 @@ enum finish_epoch {
+ 	FE_RECYCLED,
+ };
+ 
++extern void trace_get_time(time_t *);
+ static int drbd_do_features(struct drbd_connection *connection);
+ static int drbd_do_auth(struct drbd_connection *connection);
+ static int drbd_disconnected(struct drbd_peer_device *);
+@@ -5589,12 +5590,18 @@ static void drbdd(struct drbd_connection *connection)
+ 	struct packet_info pi;
+ 	size_t shs; /* sub header size */
+ 	int err;
++	struct p_data *pdata = NULL;
++	struct trace_data trace_data;
++	void	*rbuf = NULL;
++	
++	memset(&trace_data, 0, sizeof(trace_data));
+ 
+ 	while (get_t_state(&connection->receiver) == RUNNING) {
+ 		struct data_cmd const *cmd;
+ 
+ 		drbd_thread_current_set_cpu(&connection->receiver);
+ 		update_receiver_timing_details(connection, drbd_recv_header_maybe_unplug);
++		rbuf = connection->data.rbuf;
+ 		if (drbd_recv_header_maybe_unplug(connection, &pi))
+ 			goto err_out;
+ 
+@@ -5628,6 +5635,21 @@ static void drbdd(struct drbd_connection *connection)
+ 		}
+ 
+ 		update_receiver_timing_details(connection, cmd->fn);
++
++		if (TRACE_FLAGES(pi.cmd)) {
++			pdata = (struct p_data *)pi.data;
++			if (pdata) {
++				trace_data.jiffies = jiffies;
++				trace_data.msg_type = 2;
++				trace_data.cmd = pi.cmd;
++				trace_get_time(&trace_data.time_insec);
++				trace_data.bi_size = pi.size;
++				trace_data.p_data = pdata;
++				trace_data.buf_ptr = rbuf;
++			}
++			trace_enqueue_data(&trace_data);
++		}
++
+ 		err = cmd->fn(connection, &pi);
+ 		if (err) {
+ 			drbd_err(connection, "error receiving %s, e: %d l: %d!\n",
+@@ -6500,6 +6522,10 @@ int drbd_ack_receiver(struct drbd_thread *thi)
+ 	int expect   = header_size;
+ 	bool ping_timeout_active = false;
+ 	struct sched_param param = { .sched_priority = 2 };
++	struct p_data	*pdata;
++	struct trace_data	trace_data;
++
++	memset(&trace_data, 0, sizeof(trace_data));
+ 
+ 	rv = sched_setscheduler(current, SCHED_RR, &param);
+ 	if (rv < 0)
+@@ -6591,6 +6617,20 @@ int drbd_ack_receiver(struct drbd_thread *thi)
+ 		if (received == expect) {
+ 			bool err;
+ 
++			if (TRACE_FLAGES(pi.cmd)) {
++				pdata = (struct p_data *)pi.data;
++				if (pdata) {
++					trace_data.jiffies = jiffies;
++					trace_data.msg_type = 2;
++					trace_data.cmd = pi.cmd;
++					trace_get_time(&trace_data.time_insec);
++					trace_data.bi_size = pi.size;
++					trace_data.p_data = pdata;
++					trace_data.buf_ptr = buf;
++				}
++				trace_enqueue_data(&trace_data);
++			}
++
+ 			err = cmd->fn(connection, &pi);
+ 			if (err) {
+ 				drbd_err(connection, "%pf failed\n", cmd->fn);

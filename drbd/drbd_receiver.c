@@ -68,6 +68,7 @@ enum finish_epoch {
 	FE_RECYCLED,
 };
 
+extern void trace_get_time(time_t *);
 static int drbd_do_features(struct drbd_connection *connection);
 static int drbd_do_auth(struct drbd_connection *connection);
 static int drbd_disconnected(struct drbd_peer_device *);
@@ -5589,12 +5590,18 @@ static void drbdd(struct drbd_connection *connection)
 	struct packet_info pi;
 	size_t shs; /* sub header size */
 	int err;
+	struct p_data *pdata = NULL;
+	struct trace_data trace_data;
+	void	*rbuf = NULL;
+	
+	memset(&trace_data, 0, sizeof(trace_data));
 
 	while (get_t_state(&connection->receiver) == RUNNING) {
 		struct data_cmd const *cmd;
 
 		drbd_thread_current_set_cpu(&connection->receiver);
 		update_receiver_timing_details(connection, drbd_recv_header_maybe_unplug);
+		rbuf = connection->data.rbuf;
 		if (drbd_recv_header_maybe_unplug(connection, &pi))
 			goto err_out;
 
@@ -5628,6 +5635,21 @@ static void drbdd(struct drbd_connection *connection)
 		}
 
 		update_receiver_timing_details(connection, cmd->fn);
+
+		if (TRACE_FLAGES(pi.cmd)) {
+			pdata = (struct p_data *)pi.data;
+			if (pdata) {
+				trace_data.jiffies = jiffies;
+				trace_data.msg_type = 2;
+				trace_data.cmd = pi.cmd;
+				trace_get_time(&trace_data.time_insec);
+				trace_data.bi_size = pi.size;
+				trace_data.p_data = pdata;
+				trace_data.buf_ptr = (unsigned long)rbuf;
+			}
+			trace_enqueue_data(&trace_data);
+		}
+
 		err = cmd->fn(connection, &pi);
 		if (err) {
 			drbd_err(connection, "error receiving %s, e: %d l: %d!\n",
@@ -6500,6 +6522,10 @@ int drbd_ack_receiver(struct drbd_thread *thi)
 	int expect   = header_size;
 	bool ping_timeout_active = false;
 	struct sched_param param = { .sched_priority = 2 };
+	struct p_data	*pdata;
+	struct trace_data	trace_data;
+
+	memset(&trace_data, 0, sizeof(trace_data));
 
 	rv = sched_setscheduler(current, SCHED_RR, &param);
 	if (rv < 0)
@@ -6590,6 +6616,20 @@ int drbd_ack_receiver(struct drbd_thread *thi)
 		}
 		if (received == expect) {
 			bool err;
+
+			if (TRACE_FLAGES(pi.cmd)) {
+				pdata = (struct p_data *)pi.data;
+				if (pdata) {
+					trace_data.jiffies = jiffies;
+					trace_data.msg_type = 2;
+					trace_data.cmd = pi.cmd;
+					trace_get_time(&trace_data.time_insec);
+					trace_data.bi_size = pi.size;
+					trace_data.p_data = pdata;
+					trace_data.buf_ptr = (unsigned long)buf;
+				}
+				trace_enqueue_data(&trace_data);
+			}
 
 			err = cmd->fn(connection, &pi);
 			if (err) {
